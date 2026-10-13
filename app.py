@@ -8,7 +8,6 @@ import pandas as pd
 import pymupdf as fitz
 from engine import *
 from reports import workbook,matrix,client_package,GOOD
-from security import verify_password
 
 st.set_page_config(page_title='Lider Limpe | Conferência',page_icon='assets/logo.png',layout='wide',initial_sidebar_state='expanded')
 st.markdown('''<style>
@@ -16,39 +15,13 @@ st.markdown('''<style>
 </style>''',unsafe_allow_html=True)
 
 
-def auth():
-    try: users=dict(st.secrets.get('auth',{}).get('users',{}))
-    except Exception:users={}
-    if os.environ.get('LIDER_LOCAL_DEV')=='1':
-        st.warning('Modo local de desenvolvimento: sem autenticação. Não utilizar em publicação.');st.session_state['user']='desenvolvimento';return
-    if st.session_state.get('user'):return
-    if not users:
-        st.error('Acesso bloqueado: configure [auth.users] nos Secrets antes de usar documentos pessoais.')
-        st.code('[auth.users]\nconferente = "HASH_GERADO_PELO_security.py"',language='toml')
-        st.info('No computador: execute python security.py, copie o hash e configure .streamlit/secrets.toml. Na hospedagem, cole em Settings → Secrets. Não publique senhas ou documentos no GitHub.')
-        st.stop()
-    with st.form('login'):
-        st.subheader('Área restrita · Lider Limpe')
-        username=st.text_input('Usuário');password=st.text_input('Senha',type='password');submitted=st.form_submit_button('Entrar',type='primary')
-    if submitted:
-        now=time.monotonic();blocked=st.session_state.get('blocked_until',0)
-        if now<blocked:st.error('Aguarde um minuto antes de tentar novamente.')
-        elif verify_password(password,users.get(username,'')):
-            st.session_state['user']=username;st.session_state['failures']=0;st.rerun()
-        else:
-            st.session_state['failures']=st.session_state.get('failures',0)+1
-            if st.session_state['failures']>=5:st.session_state['blocked_until']=now+60;st.session_state['failures']=0
-            st.error('Credenciais inválidas.')
-    st.caption('Proteção básica do aplicativo. Para produção, usar também acesso privado/SSO e políticas de retenção do ambiente de hospedagem.')
-    st.stop()
-
 st.markdown('<div class="hero"><h1>Conferência inteligente</h1><p>Lider Limpe · Documentos, benefícios e ponto em uma única central auditável.</p></div>',unsafe_allow_html=True)
-auth()
 with st.sidebar:
     st.image('assets/logo.png',width=88)
     st.title('Lider Limpe')
     st.caption('CENTRAL DE CONFERÊNCIA')
-    st.write(f'Conferente: {st.session_state.user}')
+    st.session_state['user']=st.text_input('Nome do conferente (opcional)',value=st.session_state.get('user','Conferente'),key='reviewer_name',help='Somente para identificar as revisões. Não é login e não exige senha.').strip() or 'Não identificado (sem login)'
+    st.caption('Acesso sem senha. O nome do conferente é declarado, não autenticado. Restrinja o acesso na hospedagem.')
     st.info('CPF → nome exato → proximidade conservadora → revisão humana')
     if st.button('Encerrar e limpar sessão'):
         st.session_state.clear();st.rerun()
