@@ -2,7 +2,7 @@ import io,zipfile
 import pymupdf as fitz
 import pytest
 from engine import *
-from reports import workbook,client_package
+from reports import workbook
 
 CPF='52998224725'
 
@@ -135,15 +135,10 @@ def test_zip_budget():
     with zipfile.ZipFile(b,'w') as z:z.writestr('a.pdf',b'%PDF-'+b'x'*100)
     with pytest.raises(ValueError):unpack_files([('a.zip',b.getvalue())],max_total=20)
 
-def test_workbook_and_client_privacy():
+def test_internal_workbook_structure():
     from openpyxl import load_workbook
     p=person();rs=[record()];rows,_,_=run([p],rs)
     data=workbook(rows,[p],rs,[],meta={'Teste':'synthetic'});wb=load_workbook(io.BytesIO(data));assert 'Matriz geral' in wb.sheetnames;assert 'Auditoria documentos' in wb.sheetnames
-    package=client_package(rows,'teste')
-    with zipfile.ZipFile(io.BytesIO(package)) as z:
-        html=z.read('relatorio_cliente.html').decode();assert CPF not in html;assert '***.' in html
-        cli=load_workbook(io.BytesIO(z.read('conferencia_cliente.xlsx')))
-        assert 'Auditoria documentos' not in cli.sheetnames
 
 def test_export_formula_injection():
     from reports import safe_cell

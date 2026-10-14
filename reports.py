@@ -103,16 +103,3 @@ def workbook(rows,people=(),records=(),pages=(),decisions=None,client=False,meta
     add('Metadados',[{'Campo':k,'Valor':v} for k,v in (meta or {}).items()]+[{'Campo':'Gerado UTC','Valor':datetime.now(timezone.utc).isoformat()},{'Campo':'Exportador','Valor':'XlsxWriter; sem proteção; sem tabelas estruturadas; dados editáveis.'},{'Campo':'Escopo','Valor':'Presença em relações; VA zero é aceito com identificação segura, sem verificar saldo anterior. Não comprova pagamento, cobertura vigente ou validade fiscal. Ponto: presença da folha, não valida jornada.'}])
     wb.close();return buf.getvalue()
 
-def client_html(rows,contract_label='Lider Limpe',meta=None):
-    df=frame(rows);pending=int((~df.Status.isin(GOOD)).sum()) if not df.empty else 0
-    status='CONFERÊNCIA COM PENDÊNCIAS' if pending else 'CONFERÊNCIA CONCLUÍDA NO ESCOPO DOCUMENTAL'
-    esc=lambda x:html.escape(str(x))
-    table=matrix(rows,mask=True).to_html(index=False,escape=True,border=0) if rows else ''
-    return f'''<!DOCTYPE html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Conferência documental</title><style>body{{font:14px Arial;background:#f3f6fa;color:#16335b;margin:0;padding:32px}}main{{background:white;padding:32px;border-radius:20px;max-width:1500px;margin:auto}}h1{{color:#072f6b}}.badge{{background:#fff0db;border-left:5px solid #f57c00;padding:18px}}table{{border-collapse:collapse;width:100%;font-size:12px;margin:24px 0}}th{{background:#072f6b;color:white}}td,th{{padding:10px;border:1px solid #e5eaf1;text-align:left}}tr:nth-child(even){{background:#f6f8fc}}small{{color:#667}}@media print{{body{{padding:0;background:white}}main{{padding:8px}}table{{font-size:9px}}}}</style><main><h1>Lider Limpe · Conferência documental</h1><p>{esc(contract_label)}</p><div class="badge"><strong>{status}</strong><br>{pending} pendência(s). Resultado sujeito às fontes e às revisões registradas.</div>{table}<p>VA zerado indica presença na relação com crédito zero; o saldo anterior do cartão não foi consultado. Esta conferência verifica a presença dos colaboradores nas relações enviadas. Não constitui liberação fiscal, comprovação de pagamento ou garantia de cobertura vigente. Folhas de ponto são conferidas somente quanto à identificação/presença, não à jornada.</p><small>Gerado em {esc(datetime.now(timezone.utc).isoformat())} · CPFs parcialmente mascarados · Dados pessoais: encaminhar somente ao destinatário autorizado.</small></main></html>'''
-
-def client_package(rows,label,meta=None):
-    buf=io.BytesIO()
-    with zipfile.ZipFile(buf,'w',zipfile.ZIP_DEFLATED) as z:
-        z.writestr('conferencia_cliente.xlsx',workbook(rows,client=True,meta=meta))
-        z.writestr('relatorio_cliente.html',client_html(rows,label,meta))
-    return buf.getvalue()

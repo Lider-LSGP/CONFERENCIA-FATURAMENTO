@@ -45,7 +45,7 @@ def plausible_name(s):
     n = norm(s); t = n.split()
     if not (2 <= len(t) <= 12) or len(n) < 6: return False
     blocked = {'TOTAL','EMPRESA','CNPJ','BENEFICIARIO','BENEFICIARIOS','NOME','VALOR','SALDO','TITULAR','MATRICULA','CARTAO','COMPETENCIA','RELATORIO','PAGAMENTO','SACADO','COMPROVANTE','BANCO','CONTRATO','UNIMED','DEMONSTRATIVO','SEGURADO','SEGURADOS','SISTEMA','EMISSAO','RUBRICA','MOVIMENTOS','MENSALIDADE','PLANO','ASSISTENCIAL','COMERCIAL','PERCENTUAL','TRANSPORTE','PAGADOR','ENDERECO','COOPERATIVA','HOSPITAL','CONTROLE','COLABORADOR','ASSINATURA','FREQUENCIA'}
-    return not bool(set(t) & blocked) and len(t[0]) >= 2
+    return not bool(set(t) & blocked) and (len(t[0])>=2 or (len(t)>=3 and len(t[-1])>=2))
 
 @dataclass
 class Page:
@@ -60,6 +60,10 @@ class Page:
     layout: str = ''
     records: int = 0
     competence: str = ''
+    words: list = field(default_factory=list)
+    rotation: int = 0
+    width: float = 0
+    height: float = 0
 
 @dataclass
 class Person:
@@ -96,10 +100,12 @@ class Record:
     amount: float | None = None
     registration: str = ''
     company_cnpj: str = ''
+    boxes: list = field(default_factory=list)
+    center_cost: str = ''
     warnings: list[str] = field(default_factory=list)
 
 
-def unpack_files(files, max_total=180*1024*1024):
+def unpack_files(files, max_total=180*1024*1024,keep_duplicates=False):
     """ZIP lido em memória: sem extração em disco, links, zip-slip ou ZIP recursivo."""
     out=[]; seen=set(); total=0; messages=[]
     for name,data in files:
@@ -111,12 +117,18 @@ def unpack_files(files, max_total=180*1024*1024):
                 for info in z.infolist():
                     if info.is_dir() or not info.filename.lower().endswith('.pdf'): continue
                     if info.file_size > 60*1024*1024 or info.file_size / max(info.compress_size,1) > 150: raise ValueError('Entrada ZIP muito grande ou taxa de compressão suspeita.')
-                    entries.append((name+' / '+info.filename.replace('\\','/').split('/')[-1],z.read(info)))
+                    relative=info.filename.replace('\\','/')
+                    if relative.startswith('/') or '..' in relative.split('/'):raise ValueError('Caminho inseguro no ZIP.')
+                    entries.append((name+' / '+relative,z.read(info)))
         elif name.lower().endswith('.pdf'): entries=[(name,data)]
         else: messages.append(f'{name}: formato ignorado (use PDF/ZIP).')
         for label,blob in entries:
             h=hashlib.sha256(blob).hexdigest()
-            if h in seen: messages.append(f'{label}: arquivo idêntico ignorado.'); continue
+            if h in seen:
+                if not keep_duplicates:messages.append(f'{label}: arquivo idêntico ignorado.');continue
+                messages.append(f'{label}: cópia idêntica preservada para o ZIP final, sem duplicar a exigência do colaborador.')
+            original_label=label;copy=2
+            while any(existing[0]==label for existing in out):label=f'entrada_{copy} / '+original_label;copy+=1
             total+=len(blob)
             if total>max_total: raise ValueError('Lote excede 180 MB após descompactar.')
             if not blob.startswith(b'%PDF'): raise ValueError(f'{label}: assinatura PDF inválida.')
@@ -149,7 +161,7 @@ def extract_pdf(name,data,h,ocr=True,dpi=180,progress:Callable|None=None,focus='
         for i,p in enumerate(d):
             if progress: progress(i+1,len(d),name)
             raw=p.get_text(sort=False); lines=spatial_lines(p)
-            page=Page(name,h,i+1,raw,lines)
+            page=Page(name,h,i+1,raw,lines,words=[list(w) for w in p.get_text('words')],rotation=p.rotation,width=p.cropbox.width,height=p.cropbox.height)
             if len(re.sub(r'\s','',raw)) < 70:
                 page.ocr=True
                 if not ocr: page.error='Página sem texto; OCR desabilitado.'
@@ -166,6 +178,12 @@ def extract_pdf(name,data,h,ocr=True,dpi=180,progress:Callable|None=None,focus='
                         ol=[]
                         for _,g in df.groupby(['block_num','par_num','line_num'],sort=False): ol.append(' '.join(g.text.astype(str)))
                         page.lines=ol; page.text='\n'.join(ol)
+                        scale=p.rect.width/img.width
+                        inverse=p.derotation_matrix
+                        page.words=[]
+                        for _,word in df.iterrows():
+                            box=fitz.Rect(float(word.left)*scale,float(word.top)*scale,float(word.left+word.width)*scale,float(word.top+word.height)*scale)*inverse
+                            page.words.append([box.x0,box.y0,box.x1,box.y1,str(word.text)])
                         page.confidence=round(float(df.conf.mean()),1) if len(df) else 0
                         if not ol: page.error='OCR sem texto legível.'
                     except Exception as exc: page.error=f'OCR falhou: {str(exc)[:180]}'
@@ -185,7 +203,7 @@ def payroll(pages):
         if cj: cnpj=cj.group(1)
         cm=re.search(r'Compet[eê]ncia:\s*(\d{2}/\d{4})',text,re.I)
         if cm: competence=cm.group(1)
-        service=re.search(r'Serviço:\s*(.+?)(?:\s*-\s*CNPJ:|$)',text,re.M)
+        service=re.search(r'^Serviço:\s*(\d+\s*-\s*.+?)(?:\s*-\s*CNPJ:|$)',text,re.M)
         if service: inherited_contract=service.group(1).strip()
         elif not inherited_contract:
             srv=re.search(r'Serviços:\s*(.+)',text)
@@ -274,10 +292,26 @@ def parse_records(pages,benefit):
             for line in lines:
                 m=re.search(r'Colaborador\s*:\s*(.+?)(?:\s+(?:Função|Funcao|Contrato|Código|Codigo|CPF)\s*:|$)',line,re.I)
                 if m and plausible_name(m.group(1)):
-                    out.append(Record(uid(p.file_hash,p.number,m.group(1)),benefit,m.group(1).strip(),'',p.file,p.number,line,p.ocr,p.confidence,True,p.competence))
+                    out.append(Record(uid(p.file_hash,p.file,p.number,m.group(1)),benefit,m.group(1).strip(),'',p.file,p.number,line,p.ocr,p.confidence,True,p.competence))
             p.records=len(out)-before
             if not p.records:p.layout='Ponto: nome não identificado; revisão visual necessária'
             continue
+        if benefit=='VA':
+            from document_layout import parse_va_columns
+            positioned=parse_va_columns(p)
+            if positioned is not None:
+                if p.competence:file_competence=p.competence
+                if not p.competence:p.competence=file_competence
+                p.layout='Relação VA · colunas Nome/Centro de Custo separadas'
+                for idx,item in enumerate(positioned):
+                    if not plausible_name(item['name']):continue
+                    amount=item['amount'];active=amount is None or amount>=0;warnings=[]
+                    if amount==0:warnings.append('VA zerado: consta na relação. Saldo anterior do cartão não foi verificado.')
+                    if amount is not None and amount<0:warnings.append('Valor VA negativo: revisar documento.')
+                    out.append(Record(uid(p.file_hash,p.file,p.number,idx,benefit),benefit,item['name'],'',p.file,p.number,item['evidence'],p.ocr,p.confidence,active,p.competence,amount,item['registration'],boxes=item['boxes'],center_cost=item['center_cost'],warnings=warnings))
+                p.records=len(out)-before
+                if not p.records:p.layout='Relação VA reconhecida sem registros: revisar.'
+                continue
         relation = ('MOVIMENTOS' in n if benefit in ['Sindicato','Idesbre'] else
                     'DEMONSTRATIVO ANALITICO' in n and 'CPF' in n if benefit=='Odonto' else
                     ('NR CPF' in n or 'RESUMO DO FATURAMENTO' in n) if benefit=='Seguro de vida' else
@@ -321,8 +355,9 @@ def parse_records(pages,benefit):
                 m=re.match(r'^\d{4}[Xx*]+\d{4}\s+(.+?)(?=\s+\d|\s+R\$|$)',line)
                 if m:
                     name=m.group(1).strip()
+                    if getattr(p,'words',[]):warnings.append('Colunas do VA não reconhecidas: revisar identidade e centro de custo.')
                     # Alguns relatórios têm centro de custo textual (SESA etc.).
-                    name=re.sub(r'\s+(?:SESA|MATRIZ|PMVV)$','',name,flags=re.I)
+                    name=re.sub(r'\s+(?:SESA|MATRIZ|PMVV|TVV)$','',name,flags=re.I)
                     amounts=re.findall(r'(?:R\$\s*)?(-?[\d.]+[,.]\d{2})',line)
                     if amounts:
                         raw=amounts[-1]; amount=float(raw.replace('.','').replace(',','.')) if ',' in raw else float(raw)
@@ -346,7 +381,7 @@ def parse_records(pages,benefit):
                     if m: name=m.group(1).strip();amount=float(m.group(2).replace('.','').replace(',','.'));active=amount>0;warnings.append('Layout Alvorada genérico: revisar.')
             if name and plausible_name(name):
                 if cf and not cpf_valid(cf):warnings.append('CPF do documento inválido; exige revisão.')
-                out.append(Record(uid(p.file_hash,p.number,i,benefit),benefit,name,cf,p.file,p.number,line,p.ocr,p.confidence,active,p.competence,amount,reg,warnings=warnings))
+                out.append(Record(uid(p.file_hash,p.file,p.number,i,benefit),benefit,name,cf,p.file,p.number,line,p.ocr,p.confidence,active,p.competence,amount,reg,warnings=warnings))
         p.records=len(out)-before
         if not p.records:p.layout='Relação reconhecida, mas nenhum registro extraído: revisar layout'
     if benefit=='Seguro de vida':
@@ -359,6 +394,27 @@ def parse_records(pages,benefit):
 
 def tokens(n): return [x for x in norm(n).split() if x not in {'DA','DE','DO','DAS','DOS','E'}]
 
+def abbreviation_score(a,b):
+    aa,bb=tokens(a),tokens(b)
+    if not aa or not bb:return 0
+    short,long=(aa,bb) if len(aa)<=len(bb) else (bb,aa)
+    first_initial=len(short[0])==1 and long[0].startswith(short[0])
+    if len(short)<2 or (not first_initial and fuzz.ratio(short[0],long[0])<88):return 0
+    pos=0;quality=[]
+    for word in short:
+        options=[]
+        for idx in range(pos,len(long)):
+            other=long[idx]
+            if word==other:score=100
+            elif len(word)==1 and other.startswith(word):score=93
+            elif len(word)>=2 and other.startswith(word):score=89
+            elif len(other)>=2 and word.startswith(other):score=89
+            else:score=fuzz.ratio(word,other)
+            if score>=80:options.append((score,idx))
+        if not options:return 0
+        score,idx=max(options,key=lambda x:(x[0],-x[1]));quality.append(score);pos=idx+1
+    return min(94,round(sum(quality)/len(quality)-max(0,len(long)-len(short))*1.5,2))
+
 def name_score(a,b):
     aa,bb=tokens(a),tokens(b)
     if not aa or not bb:return 0
@@ -366,6 +422,7 @@ def name_score(a,b):
     if len(aa)==len(bb):
         aligned=sum(96 if (len(x)==1 or len(y)==1) and x[0]==y[0] else fuzz.ratio(x,y) for x,y in zip(aa,bb))/len(aa)
         direct=max(direct,aligned)
+    direct=max(direct,abbreviation_score(a,b))
     # Primeiro nome discordante reduz a confiança, mesmo com sobrenomes iguais.
     if aa[0]!=bb[0] and fuzz.ratio(aa[0],bb[0])<88:direct=min(direct,74)
     return round(direct,2)
@@ -409,7 +466,7 @@ def reconcile(people,records,pages,vt_mode='Qualquer operadora',include_ponto=Tr
             if b=='Ponto' and not include_ponto:continue
             if b=='VT' and 'VT GVBUS' in req:continue
             row_id=uid(e.id,b); expected=b in req
-            row={'id':row_id,'colaborador_id':e.id,'Colaborador':e.name,'CPF':e.cpf,'Empresa':e.company,'CNPJ':e.cnpj,'Contrato':e.contract,'Competência':e.competence,'Benefício':b,'Obrigatório':expected,'Status':'Não exigido','Nome documento':'','CPF documento':'','Similaridade':0.,'Método':'','Arquivo':'','Página':0,'Folha':e.file,'Página folha':e.page,'Observação':'','Revisor':'','Decisão em':'','Valor documento':None,'VA zerado':False}
+            row={'id':row_id,'colaborador_id':e.id,'Colaborador':e.name,'CPF':e.cpf,'Empresa':e.company,'CNPJ':e.cnpj,'Contrato':e.contract,'Competência':e.competence,'Benefício':b,'Obrigatório':expected,'Status':'Não exigido','Nome documento':'','CPF documento':'','Similaridade':0.,'Método':'','Arquivo':'','Página':0,'Folha':e.file,'Página folha':e.page,'Observação':'','Revisor':'','Decisão em':'','Valor documento':None,'VA zerado':False,'Centro de custo documento':''}
             if not expected:results.append(row);continue
             is_guard='GUARDA' in norm(e.job) and 'VIDA' in norm(e.job)
             kinds=(['VT GVBUS','VT Alvorada'] if is_guard else ['VT GVBUS']) if b=='VT' else [b]
@@ -429,7 +486,7 @@ def reconcile(people,records,pages,vt_mode='Qualquer operadora',include_ponto=Tr
             first=employee_tokens[0] if employee_tokens else ''
             ranking_pool=[r for r in pool if token_cache[r.id] and (token_cache[r.id][0][:1]==first[:1] or fuzz.ratio(first,token_cache[r.id][0])>=80)]
             ranked=sorted(((name_score(e.name,r.name),r) for r in ranking_pool),key=lambda t:t[0],reverse=True)
-            candidates[row_id]=[{'id':r.id,'nome':r.name,'cpf':r.cpf,'score':s,'arquivo':r.file,'pagina':r.page,'evidencia':r.evidence} for s,r in ranked[:5]]
+            candidates[row_id]=[{'id':r.id,'nome':r.name,'cpf':r.cpf,'score':s,'arquivo':r.file,'pagina':r.page,'centro_custo':getattr(r,'center_cost',''),'evidencia':r.evidence} for s,r in ranked[:5]]
             chosen=None;status='';method='';score=0.;obs=[]
             exactcpf=[r for r in pool if employee_cpf_valid and r.cpf==e.cpf and valid_cache[r.id]]
             exactname=[r for r in pool if name_cache[r.id]==employee_name]
@@ -457,7 +514,7 @@ def reconcile(people,records,pages,vt_mode='Qualquer operadora',include_ponto=Tr
             if chosen:
                 if chosen.ocr or chosen.warnings:obs+=chosen.warnings
                 if chosen.ocr:status='Revisar';obs.append('Correspondência de OCR exige confirmação visual; manuscrito não é validado automaticamente.')
-                if any('Layout Alvorada genérico' in w for w in chosen.warnings):status='Revisar'
+                if any('Layout Alvorada genérico' in w or 'Colunas do VA não reconhecidas' in w for w in chosen.warnings):status='Revisar'
                 if chosen.competence and chosen.competence!=e.competence:status='Competência divergente'
             decision=decisions.get(row_id)
             if decision:
@@ -476,7 +533,7 @@ def reconcile(people,records,pages,vt_mode='Qualquer operadora',include_ponto=Tr
             if e.warnings and status=='Confirmado':status='Revisar'
             row.update({'Status':status,'Similaridade':score,'Método':method,'Observação':' | '.join(dict.fromkeys(x for x in obs if x))})
             if chosen:
-                row.update({'Nome documento':chosen.name,'CPF documento':chosen.cpf,'Arquivo':chosen.file,'Página':chosen.page,'registro_id':chosen.id,'Valor documento':chosen.amount,'VA zerado':b=='VA' and chosen.amount==0})
+                row.update({'Nome documento':chosen.name,'CPF documento':chosen.cpf,'Arquivo':chosen.file,'Página':chosen.page,'registro_id':chosen.id,'Valor documento':chosen.amount,'VA zerado':b=='VA' and chosen.amount==0,'Centro de custo documento':getattr(chosen,'center_cost','')})
                 if status in ['Confirmado','Validado manualmente']:
                     key=(chosen.benefit,chosen.cpf if cpf_valid(chosen.cpf) else norm(chosen.name))
                     owners[key].add(e.cpf or e.id);used.add(chosen.id)

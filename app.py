@@ -8,7 +8,9 @@ import pandas as pd
 import altair as alt
 import pymupdf as fitz
 from engine import *
-from reports import workbook,matrix,client_package,GOOD
+from reports import matrix,GOOD
+from internal_results import pending_workbook
+from pdf_highlights import marked_pdf_zip,FINISHED
 from point_ui import render_point_workspace
 from ui_theme import THEME_CSS
 
@@ -50,14 +52,14 @@ def save_decision(row_id,action,record_id='',note=''):
     st.session_state.pop('result_signature',None)
 
 
-tabs=st.tabs(['01 · Documentos','02 · Painel','03 · Revisão','04 · Auditoria','05 · Entrega'])
+tabs=st.tabs(['01 · Documentos','02 · Painel','03 · Revisão','04 · Auditoria','05 · Resultados internos'])
 with tabs[0]:
     st.subheader('Um lote por conferência, com múltiplas folhas')
     st.caption('Carregue PDFs ou ZIPs. Confira a categoria antes de processar. Arquivos financeiros não são usados como lista de colaboradores.')
     uploaded=st.file_uploader('Folhas, relações de benefícios e folhas de ponto',type=['pdf','zip'],accept_multiple_files=True,key='uploads')
     files=[];msgs=[]
     if uploaded:
-        try:files,msgs=unpack_files([(f.name,f.getvalue()) for f in uploaded])
+        try:files,msgs=unpack_files([(f.name,f.getvalue()) for f in uploaded],keep_duplicates=True)
         except Exception as exc:st.error(str(exc))
     for msg in msgs:st.caption(msg)
     categories={};declared_months={}
@@ -118,7 +120,7 @@ with tabs[0]:
                 records+=rr
             if not people:st.error('Nenhum colaborador reconhecido. Revise o layout da folha. Não há resultado confiável.')
             else:
-                st.session_state.update({'people':people,'records':records,'pages':all_pages,'blobs':blobs,'batch':current_fingerprint,'decisions':{},'errors':errors,'messages':msgs,'base_audit':[],'config':{'ponto':include_point,'vt_mode':vt_mode,'dpi':dpi,'ocr':use_ocr,'categorias':categories,'competencias_documentos':declared_months},'manifest':{n:h for n,_,h in files},'manual_records':[],'decision_history':[],'app_version':'2.1'})
+                st.session_state.update({'people':people,'records':records,'pages':all_pages,'blobs':blobs,'batch':current_fingerprint,'decisions':{},'errors':errors,'messages':msgs,'base_audit':[],'config':{'ponto':include_point,'vt_mode':vt_mode,'dpi':dpi,'ocr':use_ocr,'categorias':categories,'competencias_documentos':declared_months},'manifest':{n:h for n,_,h in files},'manual_records':[],'decision_history':[],'point_areas':{},'app_version':'3.0'})
                 st.session_state.pop('result_signature',None)
                 st.success(f'Leitura concluída: {len(people)} colaboradores e {len(all_pages)} páginas examinadas. Consulte pendências e auditoria.')
                 label.empty();progress.empty()
@@ -129,7 +131,7 @@ if 'people' not in st.session_state:
     with tabs[1]:st.info('Carregue os documentos e processe o lote para visualizar o painel.')
     with tabs[2]:st.info('As correspondências incertas aparecerão aqui.')
     with tabs[3]:st.info('A auditoria mostrará cada página, incluindo as ignoradas como boleto/comprovante.')
-    with tabs[4]:st.info('Ao concluir, exporte Excel interno, revisão recuperável e pacote específico para o cliente.')
+    with tabs[4]:st.info('Ao concluir, exporte a planilha de pendências, salve a revisão e baixe os PDFs originais com marca-texto.')
     st.stop()
 
 people=st.session_state.people;records=st.session_state.records;pages=st.session_state.pages
@@ -276,47 +278,59 @@ with tabs[3]:
         st.json(st.session_state.decisions);st.json(st.session_state.base_audit);st.json(st.session_state.get('decision_history',[]))
 
 with tabs[4]:
-    st.subheader('Excel interno + entrega minimizada ao cliente')
-    st.caption('Exportação Excel atualizada: células editáveis, sem proteção de planilha e sem tabelas estruturadas. O Excel pode mostrar seu aviso normal de download da Internet.')
-    st.caption('O pacote do cliente inclui apenas o escopo selecionado e CPFs parcialmente mascarados. Não inclui relações integrais, dados de outros contratos ou PDFs originais.')
-    meta={'Escopo':' | '.join(f'{x[1]} / {x[2]} / {x[0]}' for x in selected),'Revisor':st.session_state.user,'Lote':st.session_state.batch,'VT':st.session_state.config['vt_mode'],'Ponto':st.session_state.config['ponto'],'Pendências':len(pending),'Problemas de processamento':len(st.session_state.errors)}
-    if st.button('Preparar planilha interna completa'):
-        internal=workbook(rows,scoped,records,pages,st.session_state.decisions,meta=meta,base_audit=st.session_state.base_audit,decision_history=st.session_state.get('decision_history',[]))
-        st.session_state['internal_export']=(signature,internal)
-    if st.session_state.get('internal_export',('',))[0]==signature:
-        st.download_button('Baixar Excel de conferência e auditoria',st.session_state.internal_export[1],'lider_limpe_conferencia_interna.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-    checkpoint={'schema':1,'manifest':st.session_state.manifest,'config':st.session_state.config,'decisions':st.session_state.decisions,'manual_records':st.session_state.manual_records,'base':[{'id':e.id,'vt':e.vt,'union':e.union,'warnings':e.warnings} for e in people],'base_audit':st.session_state.base_audit,'decision_history':st.session_state.get('decision_history',[]),'saved_at':now()}
+    st.subheader('Resultados internos · pendências e PDFs com marca-texto')
+    st.caption('Não há relatório/pacote de resultado para cliente. Estas saídas ajudam a localizar documentos e conferir internamente.')
+    meta={'Escopo':' | '.join(f'{x[1]} / {x[2]} / {x[0]}' for x in selected),'Revisor':st.session_state.user,'Lote':st.session_state.batch,'Pendências':len(pending),'Uso':'Somente interno'}
+    if st.button('Gerar planilha de pendências',type='primary'):
+        st.session_state['pending_export']=(signature,pending_workbook(rows,meta))
+    if st.session_state.get('pending_export',('',))[0]==signature:
+        st.download_button('Baixar Excel somente com pendências',st.session_state.pending_export[1],'lider_limpe_pendencias.xlsx','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    st.caption('A planilha inclui não localizados, ausência confirmada, nomes/CPF a revisar, mês incompatível e leitura inconclusiva. Não inclui confirmados, dispensados ou não exigidos.')
+    checkpoint={'schema':1,'manifest':st.session_state.manifest,'config':st.session_state.config,'decisions':st.session_state.decisions,'manual_records':st.session_state.manual_records,'base':[{'id':e.id,'vt':e.vt,'union':e.union,'warnings':e.warnings} for e in people],'base_audit':st.session_state.base_audit,'decision_history':st.session_state.get('decision_history',[]),'point_areas':st.session_state.get('point_areas',{}),'version':'3.0','saved_at':now()}
     st.download_button('Salvar revisão para continuar depois (JSON interno)',json.dumps(checkpoint,ensure_ascii=False,indent=2).encode(),'lider_limpe_revisao_interna.json','application/json')
     imported=st.file_uploader('Restaurar revisão do mesmo lote',type=['json'],key='checkpoint')
     if imported and st.button('Aplicar revisão salva'):
         try:
-            if imported.size>8*1024*1024:raise ValueError('Arquivo de revisão excede 8 MB.')
+            if imported.size>8*1024*1024:raise ValueError('Arquivo excede 8 MB.')
             cp=json.loads(imported.getvalue())
-            if cp.get('schema')!=1 or cp.get('manifest')!=st.session_state.manifest or any(st.session_state.config.get(k)!=v for k,v in cp.get('config',{}).items()):raise ValueError('O arquivo pertence a outro lote/configuração. Recarregue os mesmos PDFs e opções.')
-            if 'competencias_documentos' not in cp.get('config',{}):st.warning('Revisão de versão anterior: confira as categorias e competências informadas antes da entrega.')
+            if cp.get('schema')!=1 or cp.get('manifest')!=st.session_state.manifest or any(st.session_state.config.get(k)!=v for k,v in cp.get('config',{}).items()):raise ValueError('Outro lote/configuração. Recarregue os mesmos PDFs/opções.')
             knownpages={(p.file,p.number) for p in pages};restored=[]
             for raw in cp.get('manual_records',[]):
                 r=Record(**raw)
-                if (r.file,r.page) not in knownpages or r.benefit!='Ponto':raise ValueError('Registro manual não corresponde ao lote.')
+                if (r.file,r.page) not in knownpages or r.benefit!='Ponto':raise ValueError('Registro manual incompatível com o lote.')
                 restored.append(r)
             validids={r.id for r in records+restored}
-            if any(d.get('action') not in ['confirm','waive','missing','clear'] or (d.get('action')=='confirm' and d.get('record_id') not in validids) for d in cp.get('decisions',{}).values()):raise ValueError('Decisões contêm registros inválidos.')
+            if any(d.get('action') not in ['confirm','waive','missing','clear'] or (d.get('action')=='confirm' and d.get('record_id') not in validids) for d in cp.get('decisions',{}).values()):raise ValueError('Vínculos incompatíveis: a extração por colunas desta versão mudou. Revise o lote novamente; não será feita migração automática de nomes.')
             for r in restored:
                 if r.id not in {x.id for x in records}:records.append(r)
             st.session_state.manual_records=[asdict(r) for r in restored];st.session_state.decisions=cp.get('decisions',{})
             overrides={e['id']:e for e in cp.get('base',[])}
             for e in people:
                 if e.id in overrides:e.vt=bool(overrides[e.id]['vt']);e.union=bool(overrides[e.id]['union']);e.warnings=list(overrides[e.id]['warnings'])
-            st.session_state.base_audit=cp.get('base_audit',[]);st.session_state.decision_history=cp.get('decision_history',[]);st.rerun()
+            st.session_state.base_audit=cp.get('base_audit',[]);st.session_state.decision_history=cp.get('decision_history',[]);st.session_state.point_areas=cp.get('point_areas',{});st.rerun()
         except Exception as exc:st.error(f'Revisão não aplicada: {exc}')
     st.divider()
-    authorized=st.checkbox('Sou responsável pela entrega e conferi contrato, competência, base e pendências')
-    risk=st.checkbox('Preparar como rascunho COM PENDÊNCIAS, sem liberação de faturamento') if len(pending) or st.session_state.errors else False
-    if st.session_state.errors:st.error('Há erros de processamento/escopo. O pacote permanece bloqueado até reprocessar o lote sem esses erros.')
-    if st.button('Preparar pacote do cliente',type='primary',disabled=not authorized or bool(st.session_state.errors) or (bool(len(pending)) and not risk)):
-        data=client_package(rows,meta['Escopo'],meta)
-        st.session_state['client_export']=(signature,data)
-    if st.session_state.get('client_export',('',))[0]==signature and authorized and not st.session_state.errors and (not len(pending) or risk):
-        st.download_button('Baixar pacote do cliente (Excel + relatório HTML)',st.session_state.client_export[1],'lider_limpe_pacote_cliente.zip','application/zip')
-        st.info('Envio manual: revise o pacote e encaminhe pelo canal autorizado. O app não envia e-mail automaticamente. O HTML pode ser aberto no navegador e impresso em PDF.')
-    st.warning('Não publique documentos de colaboradores no GitHub. Excel interno e JSON de revisão contêm dados pessoais; armazene com controle de acesso.')
+    unresolved=df[df.Obrigatório & ~df.Status.isin(FINISHED)]
+    st.subheader('PDFs originais com marca-texto · baixar somente ao terminar')
+    st.write(f'Conferências ainda sem conclusão: **{len(unresolved)}**')
+    st.caption('Marca nomes com vínculo Confirmado/Validado manualmente e exigência ativa. VA zerado confirmado pode ser marcado; VT/Sindicato somente se exigidos pela folha. Ausência confirmada encerra a revisão, mas continua na planilha de pendências. Não marca sugestões ou dispensas.')
+    st.caption('Mantém os nomes dos PDFs, todas as páginas e a ordem original, inclusive boletos e comprovantes. A origem não é sobrescrita. Arquivos homônimos ficam em subpastas. Marcas são anotações editáveis; alterações invalidam eventuais assinaturas digitais do PDF.')
+    if st.session_state.errors:st.error('Há erros de processamento: corrija/reprocesse antes do ZIP final.')
+    if len(unresolved):st.info('Resolva os vínculos incertos ou confirme a ausência após conferir. O ZIP final fica bloqueado enquanto houver revisão em aberto.')
+    if st.button('Preparar ZIP dos PDFs com marca-texto',type='primary',disabled=bool(len(unresolved)) or bool(st.session_state.errors)):
+        bar=st.progress(0);label=st.empty()
+        try:
+            def markprogress(current,total,filename):bar.progress(current/max(total,1));label.text(filename)
+            blob,log=marked_pdf_zip(st.session_state.blobs,scoped,records,pages,rows,markprogress)
+            st.session_state['pdf_export']=(signature,blob,log)
+        except Exception as exc:st.error(f'PDFs não preparados: {exc}')
+        finally:bar.empty();label.empty()
+    if st.session_state.get('pdf_export',('',))[0]==signature and not len(unresolved) and not st.session_state.errors:
+        export=st.session_state.pdf_export;log=export[2]
+        misses=[line for line in log if line[4]=='SEM MARCAÇÃO']
+        if misses:st.warning(f'{len(misses)} nomes vinculados ainda não têm área segura de marcação. O download fica bloqueado para não entregar um ZIP incompleto. Em ponto manuscrito, indique a área do nome na mesa de ponto e prepare o ZIP novamente.')
+        if log:
+            with st.expander('Controle de marcações / nomes sem área identificada'):
+                st.dataframe(pd.DataFrame(log,columns=['Arquivo','Página','Nome na relação','Nome da folha','Resultado','Localização']).style.set_properties(**{'color':'#153358','background-color':'#FFFFFF'}),hide_index=True,width='stretch')
+        st.download_button('Baixar ZIP dos PDFs originais marcados',export[1],'lider_limpe_pdfs_marcados.zip','application/zip',disabled=bool(misses))
+    st.warning('Planilha, JSON e PDFs contêm dados pessoais. Uso interno; não publique no GitHub.')

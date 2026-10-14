@@ -27,7 +27,7 @@ def test_full_ui_and_excel(monkeypatch):
     assert not app.exception
     assert app.metric[0].value=='1'
     assert app.metric[3].value=='0'
-    button=next(b for b in app.button if b.label=='Preparar planilha interna completa')
+    button=next(b for b in app.button if b.label=='Gerar planilha de pendências')
     button.click().run(timeout=25)
     assert not app.exception
 

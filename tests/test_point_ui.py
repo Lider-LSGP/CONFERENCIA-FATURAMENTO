@@ -17,8 +17,8 @@ def test_visual_point_binding_hides_name_and_advances(monkeypatch):
     app.run(timeout=25);assert not app.exception
     select=next(x for x in app.selectbox if x.label=='Colaborador identificado visualmente');select.set_value('a').run(timeout=25)
     assert not app.exception
-    next(x for x in app.text_area if x.label=='Evidência visual da identificação').input('Conferi o cabeçalho e o nome na folha.')
-    next(x for x in app.checkbox if x.label=='Conferi o nome nesta página e na folha de pagamento').check()
+    assert not any(x.label=='Evidência visual da identificação' for x in app.text_area)
+    assert not any(x.label=='Conferi o nome nesta página e na folha de pagamento' for x in app.checkbox)
     next(x for x in app.button if x.label=='Vincular esta página ao colaborador').click().run(timeout=25)
     assert not app.exception
     assert next(x for x in app.metric if x.label=='Pessoas ainda pendentes no ponto').value=='1'
@@ -28,10 +28,8 @@ def test_visual_point_binding_hides_name_and_advances(monkeypatch):
     assert any('BRUNO' in str(x) for x in remaining.options)
     assert app.session_state['point_page_id']==uid('ph',2)
     # Voltar a exibir concluídos/páginas vinculadas e desfazer o vínculo.
-    next(x for x in app.checkbox if x.label=='Mostrar somente páginas ainda sem vínculo').uncheck().run(timeout=25)
+    next(x for x in app.selectbox if x.label=='Páginas para exibir').set_value('Todas').run(timeout=25)
     next(x for x in app.selectbox if x.label=='Página de ponto').set_value(uid('ph',1)).run(timeout=25)
-    next(x for x in app.text_input if x.label=='Justificativa para desfazer o vínculo desta página').input('Correção de vinculação para nova revisão.')
-    next(x for x in app.checkbox if x.label=='Conferi e quero desfazer o vínculo').check().run(timeout=25)
     next(x for x in app.button if x.label=='Desfazer vínculo desta página').click().run(timeout=25)
     assert not app.exception
     assert next(x for x in app.metric if x.label=='Pessoas ainda pendentes no ponto').value=='2'
