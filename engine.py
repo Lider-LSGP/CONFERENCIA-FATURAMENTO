@@ -233,6 +233,29 @@ def classify_file(name,text=''):
     return 'Não classificado'
 
 
+def month_hint(filename):
+    match=re.search(r'(?<!\d)(0[1-9]|1[0-2])[./-](20\d{2})(?!\d)',filename)
+    return match.group(1)+'/'+match.group(2) if match else ''
+
+def assign_document_month(pages,records,declared):
+    declared=str(declared).strip()
+    if not declared:return
+    if not re.fullmatch(r'(0[1-9]|1[0-2])/20\d{2}',declared):raise ValueError('Competência informada inválida: use MM/AAAA.')
+    conflicts={r.competence for r in records if r.competence and r.competence!=declared}
+    if conflicts:raise ValueError('Competência informada diverge do mês reconhecido no documento: '+', '.join(sorted(conflicts)))
+    for r in records:
+        if not r.competence:r.competence=declared
+    for page in pages:
+        if not page.competence:page.competence=declared
+
+def parse_passepay_row(line):
+    # Passepay/EvomPass: ID hexadecimal, nome, telefone, e-mail, crédito.
+    # Telefone/e-mail nunca são tratados como CPF ou parte do nome.
+    m=re.match(r'^([A-Fa-f0-9]{6,12})\s+(.+?)\s+(?:\+55\s*\(\d{2}\)|\+55\s+\d{2}|\(\d{2}\))\s*',line)
+    value=re.search(r'R\$\s*(-?\d[\d.]*,\d{2})\s*$',line)
+    if not m or not value or not plausible_name(m.group(2)):return None
+    return m.group(1),m.group(2).strip(),float(value.group(1).replace('.','').replace(',','.'))
+
 def parse_records(pages,benefit):
     out=[]; insurance_active=True; relation_seen=False; file_competence=''
     for p in pages:
@@ -264,12 +287,14 @@ def parse_records(pages,benefit):
         if not p.competence: p.competence=file_competence
         if benefit in ['VT GVBUS','VT Alvorada'] and any(re.match(r'^\d{10,16}\s+\d+\s+',line) for line in lines): relation=True
         if benefit=='VA' and any(re.match(r'^\d{4}[Xx*]+\d{4}\s+',line) for line in lines): relation=True
+        passepay=benefit=='VT Alvorada' and any(parse_passepay_row(line) for line in lines)
+        if passepay:relation=True
         if relation: relation_seen=True
         if not relation and benefit=='Saúde' and relation_seen and 'COD REFERENCIA' in n: relation=True
         if not relation:
             p.layout='Financeiro / não reconhecido como relação'
             continue
-        p.layout=f'Relação · {benefit}'
+        p.layout='Relação Passepay/EvomPass · VT Alvorada' if passepay else f'Relação · {benefit}'
         for i,line in enumerate(lines):
             name=''; cf=''; reg=''; amount=None; active=True; warnings=[]
             nl=norm(line)
@@ -298,10 +323,14 @@ def parse_records(pages,benefit):
                     name=m.group(1).strip()
                     # Alguns relatórios têm centro de custo textual (SESA etc.).
                     name=re.sub(r'\s+(?:SESA|MATRIZ|PMVV)$','',name,flags=re.I)
-                    amounts=re.findall(r'(?:R\$\s*)?([\d.]+[,.]\d{2})',line)
+                    amounts=re.findall(r'(?:R\$\s*)?(-?[\d.]+[,.]\d{2})',line)
                     if amounts:
                         raw=amounts[-1]; amount=float(raw.replace('.','').replace(',','.')) if ',' in raw else float(raw)
-                        if amount<=0: active=False; warnings.append('Crédito VA zero: não confirma concessão.')
+                        if amount<0:active=False;warnings.append('Valor VA negativo: revisar documento.')
+                        elif amount==0:warnings.append('VA zerado: consta na relação. Saldo anterior do cartão não foi verificado.')
+            elif benefit=='VT Alvorada' and parse_passepay_row(line):
+                reg,name,amount=parse_passepay_row(line)
+                if amount<=0:active=False;warnings.append('Carga de VT zero: presença não comprova crédito.')
             elif benefit in ['VT GVBUS','VT Alvorada']:
                 m=re.match(r'^(\d{10,16})\s+(\d+)\s+(.+?)\s+('+MONEY+r')\s+('+MONEY+r')\s*$',line)
                 if m:
@@ -341,6 +370,19 @@ def name_score(a,b):
     if aa[0]!=bb[0] and fuzz.ratio(aa[0],bb[0])<88:direct=min(direct,74)
     return round(direct,2)
 
+def abbreviated_subset(a,b):
+    # Nome encurtado na relação pode omitir sobrenomes inteiros. Sugere revisão,
+    # nunca confirmação automática, mesmo quando a pontuação global é baixa.
+    aa,bb=tokens(a),tokens(b)
+    short,long=(aa,bb) if len(aa)<len(bb) else (bb,aa)
+    if len(short)<2 or len(short)>=len(long) or short[0]!=long[0]:return False
+    pos=0
+    for word in short:
+        hit=next((i for i in range(pos,len(long)) if word==long[i] or (len(word)==1 and word==long[i][0])),None)
+        if hit is None:return False
+        pos=hit+1
+    return True
+
 def safe_fuzzy(a,b):
     aa,bb=tokens(a),tokens(b)
     return len(aa)==len(bb) and len(aa)>=3 and aa[0]==bb[0] and aa[-1]==bb[-1] and all(len(x)>1 and len(y)>1 for x,y in zip(aa,bb)) and all(fuzz.ratio(x,y)>=80 for x,y in zip(aa,bb))
@@ -367,7 +409,7 @@ def reconcile(people,records,pages,vt_mode='Qualquer operadora',include_ponto=Tr
             if b=='Ponto' and not include_ponto:continue
             if b=='VT' and 'VT GVBUS' in req:continue
             row_id=uid(e.id,b); expected=b in req
-            row={'id':row_id,'colaborador_id':e.id,'Colaborador':e.name,'CPF':e.cpf,'Empresa':e.company,'CNPJ':e.cnpj,'Contrato':e.contract,'Competência':e.competence,'Benefício':b,'Obrigatório':expected,'Status':'Não exigido','Nome documento':'','CPF documento':'','Similaridade':0.,'Método':'','Arquivo':'','Página':0,'Folha':e.file,'Página folha':e.page,'Observação':'','Revisor':'','Decisão em':''}
+            row={'id':row_id,'colaborador_id':e.id,'Colaborador':e.name,'CPF':e.cpf,'Empresa':e.company,'CNPJ':e.cnpj,'Contrato':e.contract,'Competência':e.competence,'Benefício':b,'Obrigatório':expected,'Status':'Não exigido','Nome documento':'','CPF documento':'','Similaridade':0.,'Método':'','Arquivo':'','Página':0,'Folha':e.file,'Página folha':e.page,'Observação':'','Revisor':'','Decisão em':'','Valor documento':None,'VA zerado':False}
             if not expected:results.append(row);continue
             is_guard='GUARDA' in norm(e.job) and 'VIDA' in norm(e.job)
             kinds=(['VT GVBUS','VT Alvorada'] if is_guard else ['VT GVBUS']) if b=='VT' else [b]
@@ -379,7 +421,8 @@ def reconcile(people,records,pages,vt_mode='Qualquer operadora',include_ponto=Tr
                 for r in compatible:
                     if not r.active:continue
                     key=(r.cpf if valid_cache[r.id] else name_cache[r.id],r.benefit)
-                    if key not in unique or (unique[key].ocr and not r.ocr):unique[key]=r
+                    better_va=r.benefit=='VA' and r.amount is not None and r.amount>0 and (unique[key].amount is None or unique[key].amount==0) if key in unique else False
+                    if key not in unique or (unique[key].ocr and not r.ocr) or better_va:unique[key]=r
                 pool_cache[cache_key]=(rs,compatible,list(unique.values()))
             rs,compatible,pool=pool_cache[cache_key]
             # Pré-filtro apenas para ranking por nome. CPF exato continua sendo procurado no pool completo.
@@ -398,10 +441,11 @@ def reconcile(people,records,pages,vt_mode='Qualquer operadora',include_ponto=Tr
                 if len({r.cpf for r in exactname if r.cpf})>1:status='Revisar';obs.append('Homônimo com CPFs diferentes no documento.')
                 if chosen.cpf and (not cpf_valid(chosen.cpf) or (e.cpf and chosen.cpf!=e.cpf)):status='Conflito CPF';obs.append('Nome igual não sobrepõe CPF divergente/ inválido.')
                 if len(homonyms[employee_name])>1:status='Revisar';obs.append('Homônimo na folha; nome sozinho não basta.')
-            elif ranked and ranked[0][0]>=72:
+            elif ranked and (ranked[0][0]>=72 or abbreviated_subset(e.name,ranked[0][1].name)):
                 score,chosen=ranked[0];margin=score-(ranked[1][0] if len(ranked)>1 else 0);method='Proximidade de nomes'
                 status='Confirmado' if score>=threshold and margin>=7 and safe_fuzzy(e.name,chosen.name) else 'Revisar'
                 obs.append(f'Índice de similaridade {score:.1f}; distância do 2º candidato {margin:.1f}. Não é probabilidade.')
+                if score<72:obs.append('Nome encurtado com palavras em comum na mesma ordem; revisão individual obrigatória.')
                 if chosen.cpf and (not cpf_valid(chosen.cpf) or (e.cpf and chosen.cpf!=e.cpf)):status='Conflito CPF'
             else:
                 status='Não localizado'
@@ -426,12 +470,13 @@ def reconcile(people,records,pages,vt_mode='Qualquer operadora',include_ponto=Tr
                             status='Revisar';obs.append('Vínculo manual incompatível com benefício, empresa, competência ou registro inativo.')
                 elif action=='missing':chosen=None;status='Ausência confirmada';method='Revisão humana'
                 elif action=='waive':chosen=None;status='Dispensa justificada';method='Revisão humana'
+                elif action=='clear':chosen=None;status='Revisar';method='Vínculo removido';obs.append('Vínculo removido pelo conferente; exige nova revisão.')
                 obs.append(decision.get('note',''));row['Revisor']=decision.get('reviewer','');row['Decisão em']=decision.get('at','')
             if e.warnings:obs+=e.warnings
             if e.warnings and status=='Confirmado':status='Revisar'
             row.update({'Status':status,'Similaridade':score,'Método':method,'Observação':' | '.join(dict.fromkeys(x for x in obs if x))})
             if chosen:
-                row.update({'Nome documento':chosen.name,'CPF documento':chosen.cpf,'Arquivo':chosen.file,'Página':chosen.page,'registro_id':chosen.id})
+                row.update({'Nome documento':chosen.name,'CPF documento':chosen.cpf,'Arquivo':chosen.file,'Página':chosen.page,'registro_id':chosen.id,'Valor documento':chosen.amount,'VA zerado':b=='VA' and chosen.amount==0})
                 if status in ['Confirmado','Validado manualmente']:
                     key=(chosen.benefit,chosen.cpf if cpf_valid(chosen.cpf) else norm(chosen.name))
                     owners[key].add(e.cpf or e.id);used.add(chosen.id)

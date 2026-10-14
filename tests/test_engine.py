@@ -3,7 +3,6 @@ import pymupdf as fitz
 import pytest
 from engine import *
 from reports import workbook,client_package
-from security import hash_password,verify_password
 
 CPF='52998224725'
 
@@ -149,9 +148,6 @@ def test_workbook_and_client_privacy():
 def test_export_formula_injection():
     from reports import safe_cell
     assert safe_cell('=HYPERLINK("bad")').startswith("'")
-
-def test_password_hash():
-    h=hash_password('senhaforte');assert verify_password('senhaforte',h);assert not verify_password('errada',h)
 
 def test_columns_do_not_mix_provento_and_discount():
     line='258 VALE TRANSPORTE 10,00 10,00 P 998 INSS 8,00 20,00 D'

@@ -8,14 +8,16 @@ ROOT=Path(__file__).parents[1]
 def seed(app,values):
     for key,value in values.items():app.session_state[key]=value
 
-def test_auth_blocks_without_secret(monkeypatch):
+def test_opens_without_password_or_secrets(monkeypatch):
     monkeypatch.delenv('LIDER_LOCAL_DEV',raising=False)
     app=AppTest.from_file(str(ROOT/'app.py')).run(timeout=25)
     assert not app.exception
-    assert any('Acesso bloqueado' in item.value for item in app.error)
+    assert not app.error
+    assert any(x.label=='Nome do conferente (opcional)' for x in app.text_input)
+    assert not any(x.label=='Senha' for x in app.text_input)
 
 def test_full_ui_and_excel(monkeypatch):
-    monkeypatch.setenv('LIDER_LOCAL_DEV','1')
+    monkeypatch.delenv('LIDER_LOCAL_DEV',raising=False)
     app=AppTest.from_file(str(ROOT/'app.py'))
     e=Person('person1','MARIA HELENA MATOS','52998224725','1','EMPRESA TESTE','03.659.631/0001-05','13 - DORIO','08/2026','AUX SERVICOS GERAIS',False,False,'folha.pdf',1,'synthetic')
     rs=[Record(uid(b),'VA' if b=='VA' else b,e.name,e.cpf if b in ['Odonto','Seguro de vida'] else '',f'{b}.pdf',1,'synthetic',competence=e.competence) for b in ['VA','Saúde','Odonto','Seguro de vida','Idesbre']]
@@ -31,7 +33,7 @@ def test_full_ui_and_excel(monkeypatch):
 
 
 def test_pending_review_ui(monkeypatch):
-    monkeypatch.setenv('LIDER_LOCAL_DEV','1')
+    monkeypatch.delenv('LIDER_LOCAL_DEV',raising=False)
     app=AppTest.from_file(str(ROOT/'app.py'))
     e=Person('p2','MARIA HELENA MATOS','52998224725','1','EMPRESA TESTE','03.659.631/0001-05','13 - DORIO','08/2026','AUX SERVICOS GERAIS',True,True,'folha.pdf',1,'synthetic')
     rs=[Record('r2','VA','MARIA H MATOS','','VA.pdf',1,'synthetic',competence=e.competence)]
